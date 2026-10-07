@@ -29,18 +29,7 @@ export function redact(text) {
   for (const [, pattern] of secretPatterns) { pattern.lastIndex = 0; out = out.replace(pattern, (whole, capture) => typeof capture === 'string' ? whole.replace(capture, capture.replace(/[^\r\n]/g, '*')) : whole.replace(/[^\r\n]/g, '*')); }
   return out;
 }
-export function analyze(inputFiles, name = 'application.zip', custom = {}) {
-  const began = Date.now();
-  const files = inputFiles.map(f => ({ ...f }));
-  const warnings = [], modules = [], functions = [], apis = [], endpointCandidates = [], routes = [], dependencies = [], secrets = [], findings = [], anomalies = [];
-  const nodes = new Map(), edges = new Map(), sourceMap = new Map(), sinkMap = new Map(), fnByNode = new Map(), parameterBindings = new Map(), parsed = new Map(), fnStates = new Map(), propertyWrites = new Map();
-  const sourceNames = [...SOURCE_NAMES, ...(custom.sources || []).slice(0, 30).map(s => s.match).filter(Boolean)];
-  const rules = [...SINK_RULES, ...(custom.sinks || []).slice(0, 30).map(s => ({ name: s.match, match: s.match, kind: s.kind || 'call', argument: Number.isInteger(s.argument) ? s.argument : 0, category: 'Custom', severity: 'medium', context: s.context || 'code', cwe: 'CWE-20' }))];
-  const putNode = n => { if (!nodes.has(n.id)) nodes.set(n.id, { risk: 'info', line: 0, ...n }); return n.id; };
-  const edge = (source, target, type, confidence = 'high') => { const key = `${source}|${target}|${type}`; edges.set(key, { source, target, type, confidence }); };
-  const loc = (p, file) => ({ file, line: p.node.loc?.start.line || 1, column: p.node.loc?.start.column || 0, offset: p.node.start || 0 });
-  const functionAt = p => { for (let cursor = p; cursor; cursor = cursor.parentPath) { if (fnByNode.has(cursor.node)) return fnByNode.get(cursor.node); } return null; };
-  const finding = f => { findings.push({ id: `WT-${String(findings.length + 1).padStart(3, '0')}`, severity: 'info', confidence: 'medium', status: 'Observed', exploitability: 'Not established', impact: 'Requires contextual validation', reachability: 'Static candidate; runtime reachability unknown', references: ['https://owasp.org/www-community/attacks/DOM_Based_XSS', 'https://book.hacktricks.wiki/en/pentesting-web/index.html'], ...f }); };
+export function recoverSourceMaps(files, warnings = [], anomalies = []) {
   // Maps are read as data. Recovered virtual files never become filesystem paths.
   let recoveredBytes = 0;
   for (const file of [...files]) {
@@ -58,6 +47,21 @@ export function analyze(inputFiles, name = 'application.zip', custom = {}) {
       anomalies.push({ id: id('anomaly', file.path), title: 'Source map present', file: file.path, line: 1, classification: 'Observed', description: `${recovered} embedded original sources recovered. Public availability cannot be established.` });
     } catch { warnings.push(`Unreadable source map: ${file.path}`); }
   }
+  return files;
+}
+export function analyze(inputFiles, name = 'application.zip', custom = {}, options = {}) {
+  const began = Date.now();
+  const files = inputFiles.map(f => ({ ...f }));
+  const warnings = [], modules = [], functions = [], apis = [], endpointCandidates = [], routes = [], dependencies = [], secrets = [], findings = [], anomalies = [];
+  const nodes = new Map(), edges = new Map(), sourceMap = new Map(), sinkMap = new Map(), fnByNode = new Map(), parameterBindings = new Map(), parsed = new Map(), fnStates = new Map(), propertyWrites = new Map();
+  const sourceNames = [...SOURCE_NAMES, ...(custom.sources || []).slice(0, 30).map(s => s.match).filter(Boolean)];
+  const rules = [...SINK_RULES, ...(custom.sinks || []).slice(0, 30).map(s => ({ name: s.match, match: s.match, kind: s.kind || 'call', argument: Number.isInteger(s.argument) ? s.argument : 0, category: 'Custom', severity: 'medium', context: s.context || 'code', cwe: 'CWE-20' }))];
+  const putNode = n => { if (!nodes.has(n.id)) nodes.set(n.id, { risk: 'info', line: 0, ...n }); return n.id; };
+  const edge = (source, target, type, confidence = 'high') => { const key = `${source}|${target}|${type}`; edges.set(key, { source, target, type, confidence }); };
+  const loc = (p, file) => ({ file, line: p.node.loc?.start.line || 1, column: p.node.loc?.start.column || 0, offset: p.node.start || 0 });
+  const functionAt = p => { for (let cursor = p; cursor; cursor = cursor.parentPath) { if (fnByNode.has(cursor.node)) return fnByNode.get(cursor.node); } return null; };
+  const finding = f => { findings.push({ id: `WT-${String(findings.length + 1).padStart(3, '0')}`, severity: 'info', confidence: 'medium', status: 'Observed', exploitability: 'Not established', impact: 'Requires contextual validation', reachability: 'Static candidate; runtime reachability unknown', references: ['https://owasp.org/www-community/attacks/DOM_Based_XSS', 'https://book.hacktricks.wiki/en/pentesting-web/index.html'], ...f }); };
+  if (options.recoverSources !== false) recoverSourceMaps(files, warnings, anomalies);
   const technologies = new Set();
   const addApi = (p, file, method, endpoint, extra = {}) => {
     const info = loc(p, file), fn = functionAt(p);
@@ -114,6 +118,9 @@ export function analyze(inputFiles, name = 'application.zip', custom = {}) {
       }
     }
     if (!/^(?:[cm]?[jt]sx?)$/.test(file.type)) continue;
+    if (options.inventoryOnly || options.maxSourceBytes && Buffer.byteLength(text) > options.maxSourceBytes) {
+      file.parsed = false; file.analysisStatus = 'inventory-only'; file.analysisSkipped = options.skipReason || 'Source exceeds the bounded AST size budget.'; warnings.push(`${file.path}: ${file.analysisSkipped}`); continue;
+    }
     try {
       const ast = parse(text, { sourceType: 'unambiguous', errorRecovery: true, plugins: ['jsx', 'typescript', 'decorators-legacy'], attachComment: true });
       const module = { id: id('module', file.path), file: file.path, imports: [], exports: [], dynamicImports: [], parseErrors: ast.errors.map(e => ({ line: e.loc?.line || 0, message: e.reasonCode || 'Parse error' })) };
@@ -176,14 +183,28 @@ export function analyze(inputFiles, name = 'application.zip', custom = {}) {
     const out = new Map(); for (const v of values.flat()) { const k = v.source + '|' + v.controls.join(',') + '|' + v.uncertain; if (!out.has(k) || out.get(k).trace.length > v.trace.length) out.set(k, v); } return [...out.values()].slice(0, 32);
   };
   let changed = false;
-  const mergeState = (old, incoming) => { const merged = combine(old, incoming); if (merged.length !== old.length) changed = true; return merged; };
+  let evaluationCount = 0, evaluationLimited = false, cycleCount = 0;
+  let evaluationCache = new WeakMap();
+  const evaluationBudget = options.evaluationBudget ?? 250000;
+  const limitedFiles = new Set();
+  const mergeState = (old, incoming) => { const merged = combine(old, incoming); if (merged.length !== old.length) { changed = true; evaluationCache = new WeakMap(); } return merged; };
   const step = (values, p, file, label, uncertain = false) => {
     if (!values.length) return values;
     const key = id('transform', file, p.node.start); putNode({ id: key, type: 'transformation', label, ...loc(p, file) });
     return values.map(v => { const prev = v.trace.at(-1); edge(prev, key, 'flows_to', uncertain || v.uncertain ? 'medium' : 'high'); return { ...v, controls: uncertain || /decodeURI|atob|\.replace|template interpolation/.test(label) ? [] : v.controls, uncertain: uncertain || v.uncertain, trace: [...v.trace.filter(x => x !== key), key].slice(-40) }; });
   };
   const evaluate = (p, file, seen = new Set(), depth = 0) => {
-    if (!p?.node || depth > 36 || seen.has(p.node)) return [];
+    if (!p?.node) return [];
+    if (depth > 36 || seen.has(p.node)) { cycleCount++; return []; }
+    if (evaluationCount >= evaluationBudget) { evaluationLimited = true; limitedFiles.add(file); return []; }
+    const cached = evaluationCache.get(p.node); if (cached) return cached;
+    evaluationCount++;
+    const cyclesBefore = cycleCount;
+    const result = evaluateUncached(p, file, seen, depth);
+    if (cycleCount === cyclesBefore && !evaluationLimited) evaluationCache.set(p.node, result);
+    return result;
+  };
+  const evaluateUncached = (p, file, seen, depth) => {
     const next = new Set(seen).add(p.node), n = p.node; const ev = child => evaluate(child, file, next, depth + 1);
     const browserRoot = member(n).split('.')[0]; const shadowed = ['window', 'document', 'location', 'localStorage', 'sessionStorage', 'URLSearchParams', 'FormData'].includes(browserRoot) && !!p.scope.getBinding(browserRoot);
     const label = member(n).replace(/^window\.(?=location|localStorage|sessionStorage)/, '');
@@ -287,7 +308,7 @@ export function analyze(inputFiles, name = 'application.zip', custom = {}) {
   }
   let iterations = 0;
   for (; iterations < 12; iterations++) {
-    changed = false;
+    changed = false; evaluationCache = new WeakMap();
     for (const [file, { ast }] of parsed) traverse(ast, {
       'CallExpression|NewExpression'(p) { evaluate(p, file); },
       ReturnStatement(p) { const fn = functionAt(p); if (fn) { const state = fnStates.get(fn.id); state.returns = mergeState(state.returns, evaluate(p.get('argument'), file)); } },
@@ -321,11 +342,16 @@ export function analyze(inputFiles, name = 'application.zip', custom = {}) {
     finding({ ...loc(p, file), title, category: rule.category, severity: rule.context === 'html' && !htmlReceiverKnown ? 'medium' : rule.severity, confidence: high ? 'high' : 'medium', status: high ? 'High-confidence' : 'Potential', cwe: rule.cwe, source: active.map(t => sourceMap.get(t.source)?.label).join(', '), sink: rule.name, function: fn?.name || '(module)', flowIds: flows.filter(f => f.sink === key && !f.sanitized).map(f => f.id), path: active[0].trace.map(k => ({ id: k, label: nodes.get(k)?.label, file: nodes.get(k)?.file, line: nodes.get(k)?.line })), evidence: redact(fileSlice(file, p.node)), explanation: 'A bounded static data-flow path connects an input source to this sink. Branch feasibility, deployment protections and runtime reachability are not established.' + (rule.context === 'network' ? ' This is browser destination influence, not evidence of server-side SSRF.' : ''), recommendation: rule.remediation || (rule.context === 'url' || rule.context === 'network' ? 'Parse the destination with URL and enforce an explicit protocol and origin allowlist. Validate again at the sink.' : rule.context === 'storage' ? 'Assess whether sensitive values belong in script-readable storage. Minimize retention and protect against XSS.' : 'Use explicit validated operations and a context-appropriate security control.'), validation: 'In an isolated local copy, use an inert marker to verify source control, the executed call path and the exact sink value. Check existing validation and deployment policies before concluding exploitability.' });
     nodes.get(key).risk = rule.severity; info.risk = rule.severity;
   };
+  evaluationCache = new WeakMap();
   for (const [file, { ast }] of parsed) traverse(ast, {
     'CallExpression|NewExpression'(p) { const callee = member(p.node.callee).replace(/^window\.(?=location)/, ''); for (const rule of rules) if (rule.kind === 'call' && (callee === rule.match || !rule.match.includes('.') && callee.endsWith('.' + rule.match))) { if (!rule.category || rule.category !== 'Custom') { if (p.node.callee.type === 'Identifier' && p.scope.getBinding(callee)) continue; if (resolve(p.get('callee'), file) && rule.category !== 'Custom') continue; } const args = p.get('arguments'); const value = args[rule.argument === -1 ? args.length - 1 : rule.argument]; if (value) inspectSink(p, value, rule, file); } if (['setTimeout', 'setInterval'].includes(callee) && !p.get('arguments')[0]?.isFunction()) inspectSink(p, p.get('arguments')[0], { name: callee, category: 'Code execution', context: 'code', severity: 'high', cwe: 'CWE-95' }, file); },
     AssignmentExpression(p) { const left = member(p.node.left).replace(/^window\.(?=location)/, ''); for (const rule of rules) if (rule.kind === 'assignment' && (left === rule.match || left.endsWith('.' + rule.match))) inspectSink(p, p.get('right'), rule, file); if (/\.(?:src|srcdoc)$/.test(left) && /script|iframe/i.test(left)) inspectSink(p, p.get('right'), { name: left, category: 'Dynamic loading', context: left.endsWith('srcdoc') ? 'html' : 'url', severity: 'high', cwe: 'CWE-829' }, file); },
     JSXAttribute(p) { if (p.node.name.name === 'dangerouslySetInnerHTML' && p.get('value').isJSXExpressionContainer()) inspectSink(p, p.get('value.expression'), rules.find(r => r.kind === 'jsx'), file); },
   });
+  if (evaluationLimited) {
+    warnings.push('Data-flow evaluation budget reached. Structural inventory is retained; some input-to-sink paths were not evaluated.');
+    for (const file of files) if (limitedFiles.has(file.path)) file.dataFlowStatus = 'partial';
+  }
   const seenFindings = new Set(); const uniqueFindings = findings.filter(f => { const key = `${f.file}:${f.line}:${f.title}`; if (seenFindings.has(key)) return false; seenFindings.add(key); return true; }).map((f, i) => ({ ...f, id: `WT-${String(i + 1).padStart(3, '0')}` }));
   const weights = { critical: 30, high: 18, medium: 7, low: 2, info: 0 };
   const exposure = Math.min(100, Math.round(uniqueFindings.reduce((n, f) => n + weights[f.severity] * (f.confidence === 'high' ? 1 : .65), 0)));
@@ -334,7 +360,7 @@ export function analyze(inputFiles, name = 'application.zip', custom = {}) {
   for (const fn of functions) fn.returns = fnStates.get(fn.id).returns.map(value => ({ sourceId: value.source, controls: value.controls, confidence: value.uncertain ? 'medium' : 'high' }));
   const cleanFiles = files.map(({ text, formatted, ...file }) => ({ ...file, content: text ? redact(text) : null, formatted: formatted || null }));
   const report = {
-    application: { name: name.replace(/\.zip$/i, ''), analyzedAt: new Date().toISOString(), durationMs: Date.now() - began, technologies: [...technologies], exposure, scoreLabel: 'Static Analysis Exposure Score', scoring: 'Heuristic sum: critical 30, high 18, medium 7, low 2, info 0; medium-confidence findings weighted 0.65; capped at 100. Not CVSS and not a safety certificate.', breakdown, counts: { files: files.length, javascript: files.filter(f => /^(?:[cm]?[jt]sx?)$/.test(f.type)).length, parsed: cleanFiles.filter(f => f.parsed).length, functions: functions.length, endpoints: apis.length, secrets: secrets.length, findings: uniqueFindings.length, high: uniqueFindings.filter(f => ['high', 'critical'].includes(f.severity)).length, routes: routes.length }, coverage: { fixedPointPasses: iterations, converged: !changed, compiledFiles: files.filter(f => f.minified).length, recoveredSources: files.filter(f => f.recoveredFrom).length } },
+    application: { name: name.replace(/\.zip$/i, ''), analyzedAt: new Date().toISOString(), durationMs: Date.now() - began, technologies: [...technologies], exposure, scoreLabel: 'Static Analysis Exposure Score', scoring: 'Heuristic sum: critical 30, high 18, medium 7, low 2, info 0; medium-confidence findings weighted 0.65; capped at 100. Not CVSS and not a safety certificate.', breakdown, counts: { files: files.length, javascript: files.filter(f => /^(?:[cm]?[jt]sx?)$/.test(f.type)).length, parsed: cleanFiles.filter(f => f.parsed).length, functions: functions.length, endpoints: apis.length, secrets: secrets.length, findings: uniqueFindings.length, high: uniqueFindings.filter(f => ['high', 'critical'].includes(f.severity)).length, routes: routes.length }, coverage: { fixedPointPasses: iterations, converged: !changed && !evaluationLimited, evaluationCount, evaluationLimited, dataFlowLimitedFiles: [...limitedFiles], compiledFiles: files.filter(f => f.minified).length, recoveredSources: files.filter(f => f.recoveredFrom).length } },
     files: cleanFiles, endpointCandidates, modules: modules.map(m => ({ ...m, exports: m.exports.map(({ node, ...e }) => e) })), functions, routes, apis, dependencies, secrets, sources: [...sourceMap.values()], sinks: [...sinkMap.values()], flows, call_graph: [...edges.values()].filter(e => e.type === 'calls'), graph: { nodes: [...nodes.values()], edges: [...edges.values()] }, findings: uniqueFindings, anomalies: [...new Map(anomalies.map(a => [a.id, a])).values()], warnings, limitations: LIMITATIONS, rules: { sinks: rules, sources: sourceNames }, recommendations: ['Manually validate high-confidence paths in an isolated authorized environment.', 'Confirm server-side authorization independently of frontend UI checks.', 'Verify whether exposed credential candidates are live and rotate confirmed secrets.'],
   };
   // Redaction also covers strings, labels and endpoints that may embed credentials.

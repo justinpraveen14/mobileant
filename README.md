@@ -39,13 +39,13 @@ AI requests originate directly in the browser. A localhost endpoint refers to th
 - Embedded `sourcesContent` recovery from JSON source maps, with virtual file provenance.
 - Functions, methods, classes, imports, exports and dynamic-import inventory.
 - Lexical calls, named/default local imports, simple object methods and same-class `this` methods; unresolved calls are explicitly lower confidence.
-- Bounded, flow-insensitive and context-insensitive taint propagation through assignments, parameters, returns, selected callbacks, objects, arrays and common transformations. Twelve fixed-point passes; recursive expression evaluation is bounded.
+- Bounded, flow-insensitive and context-insensitive taint propagation through assignments, parameters, returns, selected callbacks, objects, arrays and common transformations. Twelve fixed-point passes; recursive expression evaluation is bounded. Data-flow propagation across separate batches is not performed; this limitation is reported with affected import boundaries.
 - Structured source/sink database, exact-expression custom rules and HTML-context recognition of imported DOMPurify. Decoding after sanitization invalidates that recognized control.
 - Fetch, axios/ky/superagent method calls, basic XHR naming patterns, WebSocket, EventSource and sendBeacon request inventory; route candidates from React Route elements and path properties.
 - Format/assignment-based credential candidate detection with redacted content and explicit confidence. No credential validity checks.
 - Package metadata and partial lockfile indicators; no CVE database or vulnerability claims based on names alone.
 - Indicators for postMessage, localhost requests, service workers, browser extensions, role comparisons, deep-object operations and external scripts.
-- Interactive React Flow graphs with search, node-type filtering, zoom/pan and source navigation. Views are capped at 180 nodes; complete graph data remains exportable.
+- Interactive React Flow graphs with search, node-type filtering, zoom/pan and source navigation. Views are capped at 180 nodes; complete graph data remains exportable. Function inventories use 100-row pages so large bundles do not render tens of thousands of table rows at once.
 
 Read the engine's `limitations` in every report. Dynamic dispatch, framework state, branch feasibility, network reachability, backend authorization and prototype-pollution gadgets are not proven. WebAssembly is inventoried but not decompiled. HTML/CSS/SVG/config receive inventory and targeted checks, not complete browser-semantic analysis. External source-map URLs and dependencies are never fetched during analysis. Public client identifiers are not automatically proof of secret exposure. Detection and redaction cannot guarantee every secret format is recognized; review evidence before enabling optional AI.
 
@@ -53,7 +53,7 @@ Exposure scoring is a documented heuristic, not CVSS or a security certification
 
 ## ZIP safety
 
-20 MB upload; 64 MB total expanded size; 8 MB per entry; 2,000 entries; high compression-ratio rejection; no symlinks, encrypted entries or traversal/absolute paths. Embedded source-map recovery is separately capped at 24 MB and 2,500 total files. Archives are read lazily without filesystem extraction. Nested archives are inventoried, never recursively expanded. Parsing runs in a worker with a 384 MB heap and 45-second timeout. At most two analysis/upload operations are accepted simultaneously. Cross-site browser API requests are rejected. The API key never goes through the app server.
+20 MB upload; 64 MB total expanded size; 8 MB per entry; 2,000 entries; high compression-ratio rejection; no symlinks, encrypted entries or traversal/absolute paths. Embedded source-map recovery is separately capped at 24 MB and 2,500 total files. Archives are read lazily without filesystem extraction. Nested archives are inventoried, never recursively expanded. Parsing runs in sequential isolated batches with a 384 MB heap per worker. Small connected local modules are grouped within a 256 KB source budget; larger bundles are handled individually. Each batch has a 15-second limit and AST parsing is capped at 1 MB per source. The overall operation has a 120-second watchdog (105 seconds for batch scheduling). Failed/oversized batches retain inventory and source text while reporting skipped AST coverage. Recursive data-flow work is memoized and capped at 250,000 evaluations per batch; exhausted budgets and cross-batch imports are explicitly flagged as partial coverage. The coordinator retains compact report data, never all Babel ASTs at once. At most two analysis/upload operations are accepted simultaneously. Cross-site browser API requests are rejected. The API key never goes through the app server.
 
 ## Custom rules
 
